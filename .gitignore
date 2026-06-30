@@ -1,0 +1,19 @@
+# Python 字节码缓存（自动生成，不应进版本控制）
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 选股系统运行时生成的产物
+*.xlsx          # Excel 选股报告
+*.bak           # blocknew.cfg / .blk 的自动备份
+*.*.bak
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
