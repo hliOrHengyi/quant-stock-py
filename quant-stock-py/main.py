@@ -22,7 +22,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE
+    INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE,
+    AUTO_INSTALL_TO_TDX
 )
 from formula.parser import parse_file as parse_formula_file
 from formula.evaluator import Evaluator, FormulaError
@@ -30,7 +31,8 @@ from data.reader import (
     read_stock_daily, scan_industry_indices
 )
 from formula.engine import SelectionEngine
-from output.exporter import export_to_blk, export_summary, export_industry_blk, export_detailed_result
+from output.exporter import export_to_blk, export_summary, export_industry_blk, export_excel_report
+from output.tdx_installer import install_blocks
 
 
 def parse_args():
@@ -95,6 +97,10 @@ def parse_args():
     parser.add_argument(
         '--no-report', action='store_true',
         help='不导出选股报告'
+    )
+    parser.add_argument(
+        '--no-install', action='store_true',
+        help='不自动把 .blk 安装进通达信 blocknew（默认会自动安装并更新 blocknew.cfg）'
     )
 
     return parser.parse_args()
@@ -220,20 +226,55 @@ def main():
         if len(result['errors']) > 5:
             print(f"    ... (共 {len(result['errors'])} 个错误)")
     
-    # 导出
+    # 导出 .blk 到项目目录（保留一份留档）
     if result['matched_stocks'] and not args.no_export:
         export_to_blk(result['matched_stocks'], args.output)
     if result.get('matched_industry_codes') and len(result['matched_industry_codes']) > 0 and not args.no_export:
         export_industry_blk(result['matched_industry_codes'])
 
+    # 报告：Excel 版（多 sheet）+ 文本摘要
     if not args.no_report:
         export_summary(result)
-        export_detailed_result(result)
+        export_excel_report(
+            result,
+            industry_formula=args.industry_formula,
+            stock_formula=args.stock_formula,
+        )
 
-    print()
-    print("提示：请将生成的 日期选股.blk 文件手动复制到通达信")
-    print("      T0002\\blocknew 目录下，即可在通达信中查看选股结果。")
-    print()
+    # 自动安装进通达信 blocknew，重启客户端即可看到
+    if AUTO_INSTALL_TO_TDX and not args.no_install:
+        install_selection_to_tdx(result)
+    else:
+        print()
+        print("提示：未自动安装。如需手动使用，请将生成的 .blk 文件复制到")
+        print("      通达信 T0002\\blocknew 目录下。")
+        print()
+
+
+def install_selection_to_tdx(result: dict):
+    """把本次选出的板块/个股安装进通达信 blocknew（每天新增带日期板块）。"""
+    from datetime import datetime
+    today = datetime.now()
+    ddmmyyyy = f"{today.day:02d}{today.month:02d}{today.year}"
+    yymmdd = f"{today.year % 100:02d}{today.month:02d}{today.day:02d}"
+
+    blocks = []
+    if result.get('matched_industry_codes'):
+        blocks.append({
+            'blk_id': f"BK{ddmmyyyy}",
+            'name': f"{yymmdd}板块",
+            'codes': result['matched_industry_codes'],
+        })
+    if result.get('matched_stocks'):
+        blocks.append({
+            'blk_id': f"XG{ddmmyyyy}",
+            'name': f"{yymmdd}个股",
+            'codes': result['matched_stocks'],
+        })
+
+    if not blocks:
+        return
+    install_blocks(blocks)
 
 
 if __name__ == '__main__':

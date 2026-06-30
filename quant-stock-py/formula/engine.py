@@ -235,14 +235,17 @@ class SelectionEngine:
         """
         all_stocks = set()
         stock_industry_map = {}  # stock_code -> [industry_code1, industry_code2, ...]
-        
+        industry_stock_counts = {}  # industry_code -> 成分股数（用于板块汇总）
+
         for code in industry_codes:
             stocks = read_block_stocks_by_index(code)
             if stocks is None:
                 self._log(f"  {code}: 未找到成分股信息，跳过")
+                industry_stock_counts[code] = 0
                 continue
-            
+
             self._log(f"  {code}: {len(stocks)} 只成分股")
+            industry_stock_counts[code] = len(stocks)
             for stock in stocks:
                 stock_industry_map.setdefault(stock, []).append(code)
             all_stocks.update(stocks)
@@ -256,6 +259,7 @@ class SelectionEngine:
         
         result["total_candidates"] = len(all_stocks)
         result["stock_industry_map"] = stock_industry_map
+        result["industry_stock_counts"] = industry_stock_counts
         self._log(f"\n  去重后候选个股: {len(all_stocks)} 只")
         return sorted(all_stocks)
     def _filter_stocks(self,
@@ -272,48 +276,61 @@ class SelectionEngine:
         if self._stock_ast is None:
             self._log("  [跳过] 未加载个股选择公式")
             return []
-        
+
         matched_stocks = []
         total = len(candidate_stocks)
-        
+
+        # 条件诊断：在整个候选池上统计每个子条件的通过数，定位“卡掉最多股票”的瓶颈
+        cond_pass = {}      # label -> 通过数
+        cond_order = []     # 保持公式中的条件顺序
+        evaluated = 0
+
         for i, code in enumerate(candidate_stocks):
             self._log(f"  [{i+1}/{total}] {code}...", end='')
-            
+
             try:
                 df = read_stock_daily(code)
                 if df is None or len(df) < MIN_DAYS:
                     self._log(f" 数据不足，跳过")
                     continue
-                
+
                 evaluator = Evaluator(df)
-                matched = evaluator.evaluate(self._stock_ast)
-                
-                if matched:
+                info = evaluator.evaluate_full(self._stock_ast)
+                evaluated += 1
+
+                for label, ok in info["conditions"]:
+                    if label not in cond_pass:
+                        cond_pass[label] = 0
+                        cond_order.append(label)
+                    if ok:
+                        cond_pass[label] += 1
+
+                if info["result"]:
                     matched_stocks.append(code)
-                    # 收集该股票所属的板块指数代码
                     industry_codes = result.get("stock_industry_map", {}).get(code, [])
-                    # 单独捕获调试异常，不因调试失败影响选股结果
-                    try:
-                        debug_info = evaluator.evaluate_debug(self._stock_ast)
-                        if debug_info:
-                            result.setdefault("stock_details",[]).append({
-                                "code": code,
-                                "debug": debug_info,
-                                "industry_codes": industry_codes
-                            })
-                    except Exception:
-                        pass
+                    result.setdefault("stock_details", []).append({
+                        "code": code,
+                        "variables": info["variables"],
+                        "price": info["price"],
+                        "conditions": info["conditions"],
+                        "industry_codes": industry_codes,
+                    })
                     self._log(f" ✓ 符合条件")
                 else:
                     self._log(f" ✗")
-            
+
             except Exception as e:
                 self._log(f"  [错误] {e}")
                 result['errors'].append(f"个股 {code}: {e}")
-        
+
+        result["condition_diag"] = {
+            "evaluated": evaluated,
+            "rows": [(label, cond_pass[label]) for label in cond_order],
+        }
+
         self._log(f"\n  符合条件的个股: {len(matched_stocks)} / {total}")
         for code in matched_stocks:
             self._log(f"    - {code}")
-        
+
         return matched_stocks
 
