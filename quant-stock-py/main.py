@@ -108,6 +108,10 @@ def parse_args():
         '--data-source', choices=['auto', 'tdx', 'tushare'], default=None,
         help='数据源: auto(按系统自动:Mac→tushare/Windows→通达信) | tdx | tushare'
     )
+    parser.add_argument(
+        '--jobs', '-j', type=int, default=None, metavar='N',
+        help='个股筛选并行进程数 (默认: CPU核数-2; 1=串行)'
+    )
 
     return parser.parse_args()
 
@@ -216,6 +220,7 @@ def main():
         verbose=verbose,
         skip_industry=args.no_industry,
         skip_stock=args.no_stock,
+        jobs=args.jobs,
     )
     # 运行选股
     result = engine.run()

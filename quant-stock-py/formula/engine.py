@@ -11,10 +11,12 @@
 import os
 import sys
 import time
+import multiprocessing as mp
 from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
+import config
 from config import (
     INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE,
     BACKUP_OUTPUT, MIN_DAYS
@@ -28,6 +30,37 @@ from data.block_reader import (
 )
 from formula.parser import parse_file as parse_formula_file
 from formula.evaluator import Evaluator, FormulaError
+
+
+# ============== 多进程个股筛选 worker ==============
+# 设计（遵循“重输入建一次、fork 写时复制共享”）：
+#   父进程先把全市场面板建好（tushare）；fork 出的子进程继承该面板（CoW，不重建/不pickle）。
+#   每个子进程对分到的股票跑公式，返回结论+逐条件拆解+指标快照，父进程汇总。
+
+_WORKER_AST = None
+
+
+def _init_stock_worker(ast, data_source):
+    """子进程初始化：缓存公式 AST，并固定数据源（兼容 fork/spawn）。"""
+    global _WORKER_AST
+    _WORKER_AST = ast
+    config.DATA_SOURCE = data_source
+
+
+def _eval_one_stock_with(code, ast):
+    """对单只股票执行个股公式，返回 (code, info|None)。info 见 Evaluator.evaluate_full。"""
+    try:
+        df = read_stock_daily(code)
+        if df is None or len(df) < MIN_DAYS:
+            return (code, None)
+        return (code, Evaluator(df).evaluate_full(ast))
+    except Exception as e:  # 单股异常不影响整体
+        return (code, {"error": str(e)})
+
+
+def _eval_one_stock(code):
+    """多进程 worker 入口：用子进程缓存的 AST 执行。"""
+    return _eval_one_stock_with(code, _WORKER_AST)
 
 
 class SelectionEngine:
@@ -45,12 +78,14 @@ class SelectionEngine:
                  stock_formula_file: str = None,
                  verbose: bool = True,
                  skip_industry: bool = False,
-                 skip_stock: bool = False):
+                 skip_stock: bool = False,
+                 jobs: int = None):
         self.industry_formula_file = industry_formula_file or INDUSTRY_SELECT_FILE
         self.stock_formula_file = stock_formula_file or STOCK_SELECT_FILE
         self.verbose = verbose
         self._skip_industry = skip_industry
         self._skip_stock = skip_stock
+        self._jobs = jobs          # None=自动(cpu-2); 1=串行
         self._industry_ast = None
         self._stock_ast = None
         self._load_formulas()
@@ -277,51 +312,45 @@ class SelectionEngine:
             self._log("  [跳过] 未加载个股选择公式")
             return []
 
-        matched_stocks = []
         total = len(candidate_stocks)
+        jobs = self._resolve_jobs(total)
 
-        # 条件诊断：在整个候选池上统计每个子条件的通过数，定位“卡掉最多股票”的瓶颈
+        if jobs > 1:
+            self._log(f"  并行筛选 {total} 只候选个股，{jobs} 进程...")
+            outcomes = self._eval_stocks_parallel(candidate_stocks, jobs)
+        else:
+            outcomes = self._eval_stocks_serial(candidate_stocks)
+
+        # 汇总（串行/并行共用）：条件诊断 + 命中明细
+        matched_stocks = []
         cond_pass = {}      # label -> 通过数
         cond_order = []     # 保持公式中的条件顺序
         evaluated = 0
 
-        for i, code in enumerate(candidate_stocks):
-            self._log(f"  [{i+1}/{total}] {code}...", end='')
+        for code, info in outcomes:
+            if info is None:
+                continue                       # 数据不足，跳过
+            if "error" in info:
+                result['errors'].append(f"个股 {code}: {info['error']}")
+                continue
+            evaluated += 1
+            for label, ok in info["conditions"]:
+                if label not in cond_pass:
+                    cond_pass[label] = 0
+                    cond_order.append(label)
+                if ok:
+                    cond_pass[label] += 1
 
-            try:
-                df = read_stock_daily(code)
-                if df is None or len(df) < MIN_DAYS:
-                    self._log(f" 数据不足，跳过")
-                    continue
-
-                evaluator = Evaluator(df)
-                info = evaluator.evaluate_full(self._stock_ast)
-                evaluated += 1
-
-                for label, ok in info["conditions"]:
-                    if label not in cond_pass:
-                        cond_pass[label] = 0
-                        cond_order.append(label)
-                    if ok:
-                        cond_pass[label] += 1
-
-                if info["result"]:
-                    matched_stocks.append(code)
-                    industry_codes = result.get("stock_industry_map", {}).get(code, [])
-                    result.setdefault("stock_details", []).append({
-                        "code": code,
-                        "variables": info["variables"],
-                        "price": info["price"],
-                        "conditions": info["conditions"],
-                        "industry_codes": industry_codes,
-                    })
-                    self._log(f" ✓ 符合条件")
-                else:
-                    self._log(f" ✗")
-
-            except Exception as e:
-                self._log(f"  [错误] {e}")
-                result['errors'].append(f"个股 {code}: {e}")
+            if info["result"]:
+                matched_stocks.append(code)
+                industry_codes = result.get("stock_industry_map", {}).get(code, [])
+                result.setdefault("stock_details", []).append({
+                    "code": code,
+                    "variables": info["variables"],
+                    "price": info["price"],
+                    "conditions": info["conditions"],
+                    "industry_codes": industry_codes,
+                })
 
         result["condition_diag"] = {
             "evaluated": evaluated,
@@ -333,4 +362,48 @@ class SelectionEngine:
             self._log(f"    - {code}")
 
         return matched_stocks
+
+    def _resolve_jobs(self, n: int) -> int:
+        """确定并行进程数：显式 jobs 优先，否则 cpu-2；小批量退化为串行。"""
+        if n < 50:
+            return 1                            # 小批量串行，省去进程开销
+        if self._jobs is not None:
+            return max(1, self._jobs)
+        return max(1, (os.cpu_count() or 4) - 2)
+
+    def _eval_stocks_serial(self, candidate_stocks: List[str]) -> List[Tuple[str, Optional[Dict]]]:
+        """串行执行个股公式（逐只打印进度）。"""
+        total = len(candidate_stocks)
+        out = []
+        for i, code in enumerate(candidate_stocks):
+            self._log(f"  [{i+1}/{total}] {code}...", end='')
+            code, info = _eval_one_stock_with(code, self._stock_ast)
+            if info is None:
+                self._log(" 数据不足，跳过")
+            elif "error" in info:
+                self._log(f"  [错误] {info['error']}")
+            else:
+                self._log(" ✓ 符合条件" if info["result"] else " ✗")
+            out.append((code, info))
+        return out
+
+    def _eval_stocks_parallel(self, candidate_stocks: List[str], jobs: int):
+        """多进程执行个股公式。tushare 模式下父进程先建面板，fork 写时复制共享。"""
+        # 父进程构建一次重输入（全市场面板），供 fork 子进程共享
+        if config.active_data_source() == "tushare":
+            from data import tushare_source
+            tushare_source._load_stock_panel()
+
+        # macOS 下 fork 子进程涉及系统库时需放开 fork 安全限制
+        os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+        try:
+            ctx = mp.get_context("fork")       # Unix/macOS：写时复制共享面板
+        except ValueError:
+            ctx = mp.get_context()             # Windows：spawn 回退（各自读 .day）
+
+        chunk = max(1, len(candidate_stocks) // (jobs * 8))
+        with ctx.Pool(processes=jobs,
+                      initializer=_init_stock_worker,
+                      initargs=(self._stock_ast, config.active_data_source())) as pool:
+            return list(pool.imap(_eval_one_stock, candidate_stocks, chunksize=chunk))
 
