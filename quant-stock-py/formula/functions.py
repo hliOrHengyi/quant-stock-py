@@ -307,7 +307,8 @@ def func_IF(df: pd.DataFrame, args: list) -> pd.Series:
     cond = _evaluate_arg(df, args[0])
     a = _evaluate_arg(df, args[1])
     b = _evaluate_arg(df, args[2])
-    return np.where(cond, a, b)
+    # 包成带索引的 Series，否则裸 ndarray 在嵌套(REF/MA(IF(...)))或作除数时会崩
+    return pd.Series(np.where(cond, a, b), index=df.index)
 
 
 @register_func('BETWEEN')

@@ -290,7 +290,6 @@ class SelectionEngine:
             self._log("  [兜底] 从板块文件无法获取成分股，改为扫描全部个股...")
             all_stocks_list = scan_all_stocks()
             all_stocks.update(s["code"] for s in all_stocks_list if "code" in s)
-            all_stocks.update(s["code"] for s in all_stocks_list if "code" in s)
         
         result["total_candidates"] = len(all_stocks)
         result["stock_industry_map"] = stock_industry_map
