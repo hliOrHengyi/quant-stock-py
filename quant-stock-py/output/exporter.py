@@ -178,6 +178,18 @@ def _build_stock_name_map():
                 m[parts[1]] = parts[2]
     return m
 
+def _active_name_maps():
+    """按数据源返回 (股票名映射, 板块名映射)。tushare 用数据湖，通达信用本地缓存。"""
+    import config
+    if config.active_data_source() == "tushare":
+        try:
+            from data import tushare_source
+            return tushare_source.stock_name_map(), tushare_source.board_name_map()
+        except Exception:
+            return {}, {}
+    return _build_stock_name_map(), {}
+
+
 def _build_stock_concepts_map():
     m = {}
     p = os.path.join(TDX_HQ_CACHE, "specgpext.txt")
@@ -290,7 +302,7 @@ def export_excel_report(result: dict, output_path: str = None,
             os.path.dirname(OUTPUT_BLOCK_FILE),
             f"{today.day:02d}{today.month:02d}{today.year}选股报告.xlsx")
 
-    name_map = _build_stock_name_map()
+    name_map, board_name_map = _active_name_maps()
     concept_map = _build_stock_concepts_map()
     details = result.get("stock_details", [])
 
@@ -353,13 +365,14 @@ def export_excel_report(result: dict, output_path: str = None,
         hits = hit_by_industry.get(ic, 0)
         industry_rows.append({
             "板块指数代码": ic,
+            "名称": board_name_map.get(ic, ""),
             "成分股数": total_members,
             "命中个股数": hits,
             "命中率": _pct(hits, total_members) if total_members else "-",
         })
     industry_rows.sort(key=lambda r: r["命中个股数"], reverse=True)
     df_industry = pd.DataFrame(industry_rows) if industry_rows else pd.DataFrame(
-        [{"板块指数代码": "", "成分股数": 0, "命中个股数": 0, "命中率": "-"}])
+        [{"板块指数代码": "", "名称": "", "成分股数": 0, "命中个股数": 0, "命中率": "-"}])
 
     # ---------- Sheet 4: 条件诊断 ----------
     diag = result.get("condition_diag", {})

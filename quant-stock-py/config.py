@@ -11,10 +11,35 @@
         $env:TDX_ROOT="D:\通达信"  (PowerShell)
 """
 import os
+import platform
 from pathlib import Path
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent
+
+# ========== 数据源选择（跨平台：Mac 读 tushare / Windows 读通达信） ==========
+
+# 数据源: "auto" | "tdx" | "tushare"
+#   auto    —— 按操作系统自动判断：macOS → tushare，Windows/其它 → 通达信
+#   tdx     —— 强制读通达信本地 .day 数据
+#   tushare —— 强制读 tushare parquet 数据湖
+# 可被环境变量 DATA_SOURCE 或命令行 --data-source 覆盖。
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "auto")
+
+# tushare 数据湖根目录（lake/ 目录，Hive 分区 parquet）
+TUSHARE_LAKE_DIR = os.environ.get(
+    "TUSHARE_LAKE_DIR", os.path.expanduser("~/quant-data/lake"))
+
+# tushare 模式下，建面板时回看的交易日文件数（需 >114 以满足 MA(收盘,114)）
+TUSHARE_LOOKBACK_DAYS = int(os.environ.get("TUSHARE_LOOKBACK_DAYS", "250"))
+
+
+def active_data_source() -> str:
+    """解析当前生效的数据源（把 auto 落地为 tdx / tushare）。"""
+    ds = (DATA_SOURCE or "auto").lower()
+    if ds in ("tdx", "tushare"):
+        return ds
+    return "tushare" if platform.system() == "Darwin" else "tdx"
 
 # ========== 通达信安装根目录（唯一全局变量，可被环境变量覆盖） ==========
 

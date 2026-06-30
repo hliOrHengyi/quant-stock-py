@@ -10,7 +10,16 @@ import struct
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+import config
 from config import TDX_BLOCK_DIR
+
+
+def read_block_stocks_by_index(index_code: str):
+    """读取板块/行业指数的成分股，按当前数据源分发。"""
+    if config.active_data_source() == "tushare":
+        from data import tushare_source
+        return tushare_source.read_block_stocks_by_index(index_code)
+    return _tdx_read_block_stocks_by_index(index_code)
 
 
 # ============== 新版 blocknew 二进制格式解析 ==============
@@ -318,9 +327,9 @@ def _get_infoharbor_mapping() -> Dict[str, List[str]]:
     _INFOHARBOR_MAPPING = mapping
     return mapping
 
-def read_block_stocks_by_index(index_code: str) -> Optional[List[str]]:
+def _tdx_read_block_stocks_by_index(index_code: str) -> Optional[List[str]]:
     """
-    根据板块指数代码读取成分股。
+    根据板块指数代码读取成分股（通达信 blocknew）。
     例如 read_block_stocks_by_index('881319') 返回半导体板块成分股。
     
     在通达信中，板块指数 881319 对应的成分股通常存储在

@@ -21,6 +21,8 @@ import sys
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config
+
 from config import (
     INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE,
     AUTO_INSTALL_TO_TDX
@@ -102,6 +104,10 @@ def parse_args():
         '--no-install', action='store_true',
         help='不自动把 .blk 安装进通达信 blocknew（默认会自动安装并更新 blocknew.cfg）'
     )
+    parser.add_argument(
+        '--data-source', choices=['auto', 'tdx', 'tushare'], default=None,
+        help='数据源: auto(按系统自动:Mac→tushare/Windows→通达信) | tdx | tushare'
+    )
 
     return parser.parse_args()
 
@@ -169,7 +175,13 @@ def test_single_stock(code: str, formula_file: str, verbose: bool):
 
 def main():
     args = parse_args()
-    
+
+    # 命令行指定的数据源覆盖配置（在任何数据读取之前生效）
+    if args.data_source:
+        config.DATA_SOURCE = args.data_source
+    print(f"[数据源] {config.active_data_source()}  "
+          f"({'tushare 数据湖: ' + config.TUSHARE_LAKE_DIR if config.active_data_source() == 'tushare' else '通达信: ' + config.TDX_ROOT})")
+
     verbose = args.verbose or not args.quiet
     
     # 特殊模式：列出板块指数

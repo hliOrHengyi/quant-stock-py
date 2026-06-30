@@ -20,7 +20,35 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import config
 from config import TDX_LDAY_SH, TDX_LDAY_SZ, MIN_DAYS
+
+
+# ============== 数据源分发（通达信 / tushare） ==============
+# tushare 后端按需懒加载，确保 Windows(通达信)端无需安装 pyarrow。
+
+def read_stock_daily(stock_code: str):
+    """读单只股票/指数日线，按当前数据源分发。"""
+    if config.active_data_source() == "tushare":
+        from data import tushare_source
+        return tushare_source.read_stock_daily(stock_code)
+    return _tdx_read_stock_daily(stock_code)
+
+
+def scan_industry_indices():
+    """扫描板块指数，按当前数据源分发。"""
+    if config.active_data_source() == "tushare":
+        from data import tushare_source
+        return tushare_source.scan_industry_indices()
+    return _tdx_scan_industry_indices()
+
+
+def scan_all_stocks():
+    """扫描全市场个股，按当前数据源分发。"""
+    if config.active_data_source() == "tushare":
+        from data import tushare_source
+        return tushare_source.scan_all_stocks()
+    return _tdx_scan_all_stocks()
 
 
 def _parse_day_file(filepath: str) -> Optional[pd.DataFrame]:
@@ -95,9 +123,9 @@ def _exchange_from_filename(filename: str) -> str:
     return basename[:2]
 
 
-def read_stock_daily(stock_code: str) -> Optional[pd.DataFrame]:
+def _tdx_read_stock_daily(stock_code: str) -> Optional[pd.DataFrame]:
     """
-    读取指定股票/板块指数的日线数据。
+    读取指定股票/板块指数的日线数据（通达信 .day）。
     自动在 sh 和 sz 目录中查找。
 
     Args:
@@ -121,7 +149,7 @@ def read_stock_daily(stock_code: str) -> Optional[pd.DataFrame]:
     return None
 
 
-def scan_industry_indices() -> List[Dict]:
+def _tdx_scan_industry_indices() -> List[Dict]:
     """
     扫描所有行业板块指数（88 开头的指数）。
     返回列表，每项包含 {'code': '881319', 'exchange': 'sh'}。
@@ -146,7 +174,7 @@ def scan_industry_indices() -> List[Dict]:
     return indices
 
 
-def scan_all_stocks() -> List[Dict]:
+def _tdx_scan_all_stocks() -> List[Dict]:
     """
     扫描所有非指数股票（非 88/99/90 开头的代码）。
     返回列表，每项包含 {'code': '600519', 'exchange': 'sh'}。
