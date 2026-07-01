@@ -5,12 +5,11 @@
 这样用户重启通达信客户端后，即可在“自定义板块”中看到选出的板块/个股，
 无需再手动复制 .blk 文件。
 
-blocknew.cfg 格式（通达信自定义板块登记表）：
-    文件由若干条定长记录拼接而成，每条 384 字节：
+blocknew.cfg 格式（通达信自定义板块登记表，实测原生格式）：
+    文件由若干条定长记录拼接而成，每条 120 字节：
       偏移 0   长度 50   板块显示名称   (GBK, \\x00 补齐)
       偏移 50  长度 70   板块标识/文件名 (即 blocknew 下 {id}.blk 的 id，GBK)
-      偏移 120 长度 2    板块类型        (uint16 小端，自定义板块取 0)
-      偏移 122 长度 262  保留            (\\x00)
+    （记录仅此两字段；无类型字段、无保留区。涨幅/成分数等为客户端运行时计算，不入此文件。）
 
 {id}.blk 为纯文本：每行 7 个字符 = 市场前缀(1) + 6 位代码，GBK 编码。
     市场前缀：1=上海(含科创板/板块指数)  0=深圳(含创业板)  2=北交所
@@ -29,11 +28,12 @@ from config import TDX_BLOCK_DIR, TDX_BLOCKNEW_CFG
 # 通达信主进程名（用于安装前检测客户端是否在运行）
 _TDX_PROCESS_NAME = "TdxW.exe"
 
-# blocknew.cfg 单条记录布局
-_CFG_RECORD_SIZE = 384
+# blocknew.cfg 单条记录布局（实测通达信原生格式：每条 120 字节 = 名称50 + 标识70，
+# 无类型字段、无保留区）。此前误设为 384 会在每条真实记录后留下全 0 尾部，
+# 通达信按 120 字节步进读取时会把该尾部当成“空记录”而停止解析，导致只显示第一个板块。
+_CFG_RECORD_SIZE = 120
 _CFG_NAME_SIZE = 50      # 板块显示名称
 _CFG_ID_SIZE = 70        # 板块标识（.blk 文件名，不含扩展名）
-_CFG_TYPE_OFFSET = _CFG_NAME_SIZE + _CFG_ID_SIZE  # 120
 
 
 def market_prefix(code: str) -> Optional[str]:
@@ -81,13 +81,11 @@ def _gbk_field(text: str, size: int) -> bytes:
     return raw + b'\x00' * (size - len(raw))
 
 
-def _build_cfg_record(block_name: str, blk_id: str, block_type: int = 0) -> bytes:
-    """构造一条 384 字节的 blocknew.cfg 记录。"""
+def _build_cfg_record(block_name: str, blk_id: str) -> bytes:
+    """构造一条 120 字节的 blocknew.cfg 记录：名称(50) + 标识(70)。"""
     rec = bytearray(_CFG_RECORD_SIZE)
     rec[0:_CFG_NAME_SIZE] = _gbk_field(block_name, _CFG_NAME_SIZE)
     rec[_CFG_NAME_SIZE:_CFG_NAME_SIZE + _CFG_ID_SIZE] = _gbk_field(blk_id, _CFG_ID_SIZE)
-    rec[_CFG_TYPE_OFFSET] = block_type & 0xFF
-    rec[_CFG_TYPE_OFFSET + 1] = (block_type >> 8) & 0xFF
     return bytes(rec)
 
 
@@ -99,7 +97,7 @@ def _parse_cfg_record(rec: bytes) -> Tuple[str, str]:
 
 
 def _read_cfg_records(cfg_path: str) -> List[bytes]:
-    """读取 blocknew.cfg，返回 384 字节记录列表（文件不存在则空列表）。"""
+    """读取 blocknew.cfg，返回 120 字节记录列表（文件不存在则空列表）。"""
     if not os.path.isfile(cfg_path):
         return []
     with open(cfg_path, 'rb') as f:
@@ -119,8 +117,7 @@ def _backup(path: str) -> Optional[str]:
 
 
 def update_blocknew_cfg(entries: List[Tuple[str, str]],
-                        cfg_path: str = None,
-                        block_type: int = 0) -> bool:
+                        cfg_path: str = None) -> bool:
     """
     把若干 (板块名, 板块标识) 登记进 blocknew.cfg（读改写 + 备份 + 幂等）。
 
@@ -141,7 +138,7 @@ def update_blocknew_cfg(entries: List[Tuple[str, str]],
         kept.append(rec)
 
     for name, blk_id in entries:
-        kept.append(_build_cfg_record(name, blk_id, block_type))
+        kept.append(_build_cfg_record(name, blk_id))
 
     bak = _backup(cfg_path)
     if bak:
