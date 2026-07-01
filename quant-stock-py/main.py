@@ -284,7 +284,7 @@ def install_selection_to_tdx(result: dict):
         })
     if result.get('matched_stocks'):
         blocks.append({
-            'blk_id': f"XG{ddmmyyyy}",
+            'blk_id': f"GG{ddmmyyyy}",
             'name': f"{yymmdd}个股",
             'codes': result['matched_stocks'],
         })

@@ -20,10 +20,14 @@ blocknew.cfg 格式（通达信自定义板块登记表）：
 """
 import os
 import shutil
+import subprocess
 from datetime import datetime
 from typing import List, Optional, Tuple
 
 from config import TDX_BLOCK_DIR, TDX_BLOCKNEW_CFG
+
+# 通达信主进程名（用于安装前检测客户端是否在运行）
+_TDX_PROCESS_NAME = "TdxW.exe"
 
 # blocknew.cfg 单条记录布局
 _CFG_RECORD_SIZE = 384
@@ -148,6 +152,21 @@ def update_blocknew_cfg(entries: List[Tuple[str, str]],
     return True
 
 
+def is_tdx_running() -> bool:
+    """检测通达信主客户端（TdxW.exe）是否正在运行（仅 Windows 有效）。"""
+    if os.name != "nt":
+        return False
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {_TDX_PROCESS_NAME}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return _TDX_PROCESS_NAME.lower() in out.stdout.lower()
+    except Exception:
+        # 检测失败时不阻断安装，交由调用方按需处理
+        return False
+
+
 def install_blocks(blocks: List[dict],
                    block_dir: str = None,
                    cfg_path: str = None) -> bool:
@@ -160,6 +179,11 @@ def install_blocks(blocks: List[dict],
 
     Returns:
         True 安装成功；False 跳过（如 blocknew 目录不存在 —— 通常意味着不在装有通达信的 Windows 上）。
+
+    注意：通达信客户端在启动时把 blocknew.cfg 读入内存，运行期间不会热加载磁盘改动，
+          且退出时可能以内存快照覆盖回写。因此安装必须在通达信「完全关闭」时进行，
+          否则新板块不会显示。若检测到客户端在运行则中止（可用环境变量
+          TDX_ALLOW_RUNNING=1 强制跳过该检查）。
     """
     block_dir = block_dir or TDX_BLOCK_DIR
     cfg_path = cfg_path or TDX_BLOCKNEW_CFG
@@ -167,6 +191,13 @@ def install_blocks(blocks: List[dict],
     if not os.path.isdir(block_dir):
         print(f"\n  [跳过安装] 未找到通达信 blocknew 目录: {block_dir}")
         print(f"             （请确认已安装通达信，或通过环境变量 TDX_ROOT 指定正确路径）")
+        return False
+
+    if os.environ.get("TDX_ALLOW_RUNNING") != "1" and is_tdx_running():
+        print(f"\n  [中止安装] 检测到通达信客户端（{_TDX_PROCESS_NAME}）正在运行。")
+        print(f"             通达信启动时会缓存 blocknew.cfg，运行期间写入的新板块不会显示。")
+        print(f"             请：① 完全退出通达信  ② 重新运行本脚本  ③ 再启动通达信查看。")
+        print(f"             （如确需在运行时写入，可设置环境变量 TDX_ALLOW_RUNNING=1 跳过此检查）")
         return False
 
     print(f"\n  安装自定义板块到通达信: {block_dir}")
@@ -182,5 +213,5 @@ def install_blocks(blocks: List[dict],
 
     update_blocknew_cfg(entries, cfg_path=cfg_path)
     print(f"  已登记 {len(entries)} 个板块到 blocknew.cfg")
-    print(f"  >> 请重启通达信客户端，在“自定义板块”中查看。")
+    print(f"  >> 请启动通达信客户端（安装已在其关闭时完成），在“自定义板块”中查看。")
     return True
