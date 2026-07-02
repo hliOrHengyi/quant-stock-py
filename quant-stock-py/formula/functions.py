@@ -148,11 +148,22 @@ def func_SMA(df: pd.DataFrame, args: list) -> pd.Series:
     x = _evaluate_arg(df, args[0])
     n = int(_resolve_n(args[1], df))
     m = float(_resolve_n(args[2], df))
-    
-    result = np.zeros(len(x))
-    result[0] = x.iloc[0]
-    for i in range(1, len(x)):
-        result[i] = (x.iloc[i] * m + result[i-1] * (n - m)) / n
+
+    # 递归从首个非 NaN 值起种；否则前导 NaN（如 REF/差分首日）会污染整条序列为 NaN。
+    vals = x.to_numpy(dtype=float)
+    result = np.full(len(vals), np.nan)
+    prev = np.nan
+    for i in range(len(vals)):
+        xi = vals[i]
+        if np.isnan(prev):
+            if not np.isnan(xi):
+                prev = xi
+                result[i] = xi
+            continue
+        if np.isnan(xi):
+            xi = prev          # 中途缺失则维持上一值，不传播 NaN
+        prev = (xi * m + prev * (n - m)) / n
+        result[i] = prev
     return pd.Series(result, index=x.index)
 
 
@@ -296,7 +307,8 @@ def func_IF(df: pd.DataFrame, args: list) -> pd.Series:
     cond = _evaluate_arg(df, args[0])
     a = _evaluate_arg(df, args[1])
     b = _evaluate_arg(df, args[2])
-    return np.where(cond, a, b)
+    # 包成带索引的 Series，否则裸 ndarray 在嵌套(REF/MA(IF(...)))或作除数时会崩
+    return pd.Series(np.where(cond, a, b), index=df.index)
 
 
 @register_func('BETWEEN')

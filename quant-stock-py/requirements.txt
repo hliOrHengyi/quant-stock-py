@@ -1,2 +1,6 @@
-﻿pandas>=1.5.0
+pandas>=1.5.0
 numpy>=1.23.0
+openpyxl>=3.0.0
+
+# 仅 tushare 数据源(macOS)需要；Windows/通达信端可不装
+pyarrow>=10.0.0

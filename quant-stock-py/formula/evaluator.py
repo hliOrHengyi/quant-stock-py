@@ -134,6 +134,111 @@ class Evaluator:
                           "volume": int(self.df["volume"].iloc[-1]),
                           "amount": float(self.df["amount"].iloc[-1])}}
 
+    def evaluate_full(self, ast: Program) -> dict:
+        """
+        一次执行公式，返回选股结论 + 逐条件拆解 + 变量/价格快照。
+
+        供引擎在整个候选池上统计「条件诊断」（每个子条件的通过率），
+        并为命中个股生成明细，避免对同一只股票重复执行公式。
+
+        返回:
+            {
+              "result": bool,                       # 是否最终入选
+              "conditions": [("白线在黄线上", True), ("C3", False), ...],  # XG 顶层 AND 各子条件
+              "variables": {"J": 12.3, "VAR6A": 8.1, ...},               # ASCII 大写中间变量末值
+              "price": {"close":..., "pct_chg":..., "vol_ratio":..., ...}
+            }
+        """
+        xg_result = None
+        xg_expr = None
+        for stmt in ast.statements:
+            if isinstance(stmt, AssignStmt):
+                self._exec_assign(stmt)
+            elif isinstance(stmt, XGStmt):
+                xg_result = self._exec_xg(stmt)
+                xg_expr = stmt.expr
+            elif isinstance(stmt, ExprStmt):
+                self._exec_expr(stmt)
+        if xg_result is None:
+            raise FormulaError("公式中未找到 XG 选股信号输出语句")
+
+        last_val = xg_result.iloc[-1] if hasattr(xg_result, 'iloc') else xg_result
+        result = False if pd.isna(last_val) else bool(last_val)
+        return {
+            "result": result,
+            "conditions": self._split_and_conditions(xg_expr),
+            "variables": self._snapshot_variables(),
+            "price": self._snapshot_price(),
+        }
+
+    def _split_and_conditions(self, expr) -> list:
+        """把 XG 顶层 AND 链拆成各子条件，返回 [(标签, 是否通过), ...]。"""
+        def collect(n):
+            if isinstance(n, BinOp) and n.op.upper() == 'AND':
+                return collect(n.left) + collect(n.right)
+            return [n]
+
+        out = []
+        for node in collect(expr):
+            series = self._eval_node(node)
+            last = series.iloc[-1] if hasattr(series, 'iloc') else series
+            ok = False if pd.isna(last) else bool(last)
+            out.append((self._render_label(node), ok))
+        return out
+
+    def _render_label(self, node) -> str:
+        """为子条件生成可读标签（变量名 / 简化表达式）。"""
+        if isinstance(node, Identifier):
+            return node.name
+        if isinstance(node, Number):
+            return str(node.value)
+        if isinstance(node, BinOp):
+            return f"{self._render_label(node.left)}{node.op}{self._render_label(node.right)}"
+        if isinstance(node, UnaryOp):
+            return f"{node.op}{self._render_label(node.operand)}"
+        if isinstance(node, FuncCall):
+            return f"{node.name}(...)"
+        return str(node)
+
+    def _snapshot_variables(self) -> dict:
+        """采集所有 ASCII 大写中间变量在最后一根 K 线上的值。"""
+        variables = {}
+        for col in self.df.columns:
+            if col.isupper() and col not in FIELD_ALIASES:
+                try:
+                    v = self.df[col].iloc[-1]
+                    if isinstance(v, (int, float, np.integer, np.floating)):
+                        variables[col] = round(float(v), 4)
+                    elif isinstance(v, np.bool_):
+                        variables[col] = bool(v)
+                    else:
+                        variables[col] = str(v)
+                except Exception:
+                    pass
+        return variables
+
+    def _snapshot_price(self) -> dict:
+        """采集最后一根 K 线的行情快照（含昨收、涨跌幅、量比）。"""
+        close = self.df['close']
+        cur = float(close.iloc[-1])
+        prev = float(close.iloc[-2]) if len(close) >= 2 else None
+        pct = round((cur / prev - 1) * 100, 2) if prev else None
+        vol = self.df['volume']
+        cur_v = float(vol.iloc[-1])
+        prev_v = float(vol.iloc[-2]) if len(vol) >= 2 else None
+        vol_ratio = round(cur_v / prev_v, 2) if prev_v else None
+        return {
+            "close": cur,
+            "open": float(self.df['open'].iloc[-1]),
+            "high": float(self.df['high'].iloc[-1]),
+            "low": float(self.df['low'].iloc[-1]),
+            "volume": int(cur_v),
+            "amount": float(self.df['amount'].iloc[-1]),
+            "prev_close": prev,
+            "pct_chg": pct,
+            "vol_ratio": vol_ratio,
+        }
+
     def _debug_expr(self, node) -> dict:
         if isinstance(node, BinOp):
             if node.op.upper() == "AND":
