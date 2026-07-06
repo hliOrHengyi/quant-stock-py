@@ -72,7 +72,7 @@ STOCK_SELECT_FILE = os.path.join(PROJECT_ROOT, "个股选股.txt")
 # ========== 输出路径（写入当前项目目录） ==========
 
 # 默认输出板块文件
-OUTPUT_BLOCK_FILE = os.path.join(PROJECT_ROOT, "日期选股.blk")
+OUTPUT_BLOCK_FILE = os.path.join(PROJECT_ROOT, "dailyresult", "日期选股.blk")
 
 # 是否备份已有的输出文件
 BACKUP_OUTPUT = True

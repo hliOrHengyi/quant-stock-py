@@ -11,6 +11,13 @@ from typing import List
 from config import OUTPUT_BLOCK_FILE, BACKUP_OUTPUT, TDX_HQ_CACHE
 
 
+def _daily_dir() -> str:
+    """返回当天输出子目录: dailyresult/ddMMyyyy/"""
+    today = datetime.now()
+    date_str = f"{today.day:02d}{today.month:02d}{today.year}"
+    return os.path.join(os.path.dirname(OUTPUT_BLOCK_FILE), date_str)
+
+
 def export_to_blk(stock_codes: List[str],
                   output_path: str = None,
                   backup: bool = None) -> str:
@@ -33,7 +40,7 @@ def export_to_blk(stock_codes: List[str],
     from datetime import datetime
     if output_path is None:
         today = datetime.now()
-        output_path = os.path.join(os.path.dirname(OUTPUT_BLOCK_FILE), f"{today.day:02d}{today.month:02d}{today.year}个股.blk")
+        output_path = os.path.join(_daily_dir(), f"{today.day:02d}{today.month:02d}{today.year}个股.blk")
     backup = BACKUP_OUTPUT if backup is None else backup
 
     # 确保输出目录存在
@@ -89,8 +96,7 @@ def export_summary(result: dict, output_path: str = None):
         output_path: 摘要文件路径
     """
     if output_path is None:
-        output_dir = os.path.dirname(OUTPUT_BLOCK_FILE)
-        output_path = os.path.join(output_dir, '选股报告.txt')
+        output_path = os.path.join(_daily_dir(), '选股报告.txt')
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -144,8 +150,7 @@ def export_industry_blk(industry_codes: List[str],
     from datetime import datetime
     today = datetime.now()
     default_name = f"{today.day:02d}{today.month:02d}{today.year}板块.blk"
-    output_path = output_path or os.path.join(
-        os.path.dirname(OUTPUT_BLOCK_FILE), default_name)
+    output_path = output_path or os.path.join(_daily_dir(), default_name)
     
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):
@@ -207,7 +212,7 @@ def export_detailed_result(result: dict, output_path: str = None):
     import pandas as pd
     from datetime import datetime
     today = datetime.now()
-    output_path = output_path or os.path.join(os.path.dirname(OUTPUT_BLOCK_FILE),
+    output_path = output_path or os.path.join(_daily_dir(),
         f"{today.day:02d}{today.month:02d}{today.year}选股详情.csv")
 
     name_map = _build_stock_name_map()
@@ -298,8 +303,7 @@ def export_excel_report(result: dict, output_path: str = None,
 
     today = datetime.now()
     if output_path is None:
-        output_path = os.path.join(
-            os.path.dirname(OUTPUT_BLOCK_FILE),
+        output_path = os.path.join(_daily_dir(),
             f"{today.day:02d}{today.month:02d}{today.year}选股报告.xlsx")
 
     name_map, board_name_map = _active_name_maps()
