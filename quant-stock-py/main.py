@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
 from config import (
-    INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE,
+    INDUSTRY_SELECT_FILE, STOCK_RESEARCH_DIR, OUTPUT_BLOCK_FILE,
     AUTO_INSTALL_TO_TDX
 )
 from formula.parser import parse_file as parse_formula_file
@@ -55,9 +55,9 @@ def parse_args():
         help=f'板块选择公式文件路径 (默认: {INDUSTRY_SELECT_FILE})'
     )
     parser.add_argument(
-        '--stock-formula', '-sf',
-        default=STOCK_SELECT_FILE,
-        help=f'个股选择公式文件路径 (默认: {STOCK_SELECT_FILE})'
+        '--stock-formula-dir', '-sf',
+        default=STOCK_RESEARCH_DIR,
+        help=f'个股公式目录（目录下所有 .txt 作为独立公式） (默认: {STOCK_RESEARCH_DIR})'
     )
     parser.add_argument(
         '--output', '-o',
@@ -200,7 +200,14 @@ def main():
     
     # 特殊模式：测试单只股票
     if args.test_stock:
-        test_single_stock(args.test_stock, args.stock_formula, verbose)
+        if os.path.isdir(args.stock_formula_dir):
+            files = sorted([f for f in os.listdir(args.stock_formula_dir) if f.endswith('.txt')])
+            if files:
+                test_single_stock(args.test_stock, os.path.join(args.stock_formula_dir, files[0]), verbose)
+            else:
+                print('[错误] 个股公式目录为空')
+        else:
+            print('[错误] 个股公式目录不存在')
         return
     
     # 正常选股模式
@@ -216,7 +223,7 @@ def main():
     # 创建引擎
     engine = SelectionEngine(
         industry_formula_file=args.industry_formula,
-        stock_formula_file=args.stock_formula,
+        stock_formula_dir=args.stock_formula_dir,
         verbose=verbose,
         skip_industry=args.no_industry,
         skip_stock=args.no_stock,
@@ -225,42 +232,51 @@ def main():
     # 运行选股
     result = engine.run()
     
+    summary = result.get('summary', {})
+    formulas = result.get('formulas', {})
+    
     # 输出结果
     print()
     print("=" * 60)
     print("选股完成")
     print("=" * 60)
-    print(f"  板块指数:   {result['total_industries']} 个")
-    print(f"  符合板块:   {result['matched_industries']} 个")
-    print(f"  候选个股:   {result['total_candidates']} 只")
-    print(f"  最终入选:   {result['total_matched']} 只")
-    print(f"  耗时:       {result['duration']} 秒")
+    print(f"  板块指数:   {summary.get('total_industries', 0)} 个")
+    print(f"  符合板块:   {summary.get('matched_industries', 0)} 个")
+    print(f"  候选个股:   {summary.get('total_candidates', 0)} 只")
+    print(f"  耗时:       {summary.get('duration', 0)} 秒")
     
-    if result['errors']:
-        print(f"  错误数:     {len(result['errors'])}")
-        for err in result['errors'][:5]:
+    for fname, fresult in formulas.items():
+        print(f"  [{fname}] 入选: {fresult.get('total_matched', 0)} 只")
+    
+    if summary.get('errors'):
+        print(f"  错误数:     {len(summary['errors'])}")
+        for err in summary['errors'][:5]:
             print(f"    - {err}")
-        if len(result['errors']) > 5:
-            print(f"    ... (共 {len(result['errors'])} 个错误)")
+        if len(summary['errors']) > 5:
+            print(f"    ... (共 {len(summary['errors'])} 个错误)")
     
-    # 导出 .blk 到项目目录（保留一份留档）
-    if result['matched_stocks'] and not args.no_export:
-        export_to_blk(result['matched_stocks'], args.output)
-    if result.get('matched_industry_codes') and len(result['matched_industry_codes']) > 0 and not args.no_export:
-        export_industry_blk(result['matched_industry_codes'])
+    # 导出板块 .blk（共享，一份）
+    if summary.get('matched_industry_codes') and not args.no_export:
+        export_industry_blk(summary['matched_industry_codes'])
 
-    # 报告：Excel 版（多 sheet）+ 文本摘要
+    # 逐公式导出个股 .blk
+    if not args.no_export:
+        for fname, fresult in formulas.items():
+            if fresult.get('matched_stocks'):
+                export_to_blk(fresult['matched_stocks'], formula_name=fname)
+
     if not args.no_report:
         export_summary(result)
-        export_excel_report(
-            result,
-            industry_formula=args.industry_formula,
-            stock_formula=args.stock_formula,
-        )
+        for fname, fresult in formulas.items():
+            export_excel_report(
+                fresult, industry_formula=args.industry_formula,
+                stock_formula=os.path.join(args.stock_formula_dir, fname + '.txt'),
+                formula_name=fname,
+            )
 
-    # 自动安装进通达信 blocknew，重启客户端即可看到
+    # 自动安装进通达信 blocknew
     if AUTO_INSTALL_TO_TDX and not args.no_install:
-        install_selection_to_tdx(result)
+        install_selection_to_tdx(summary, formulas)
     else:
         print()
         print("提示：未自动安装。如需手动使用，请将生成的 .blk 文件复制到")
@@ -268,7 +284,7 @@ def main():
         print()
 
 
-def install_selection_to_tdx(result: dict):
+def install_selection_to_tdx(summary: dict, formulas: dict):
     """把本次选出的板块/个股安装进通达信 blocknew（每天新增带日期板块）。"""
     from datetime import datetime
     today = datetime.now()
@@ -276,18 +292,21 @@ def install_selection_to_tdx(result: dict):
     yymmdd = f"{today.year % 100:02d}{today.month:02d}{today.day:02d}"
 
     blocks = []
-    if result.get('matched_industry_codes'):
+    if summary.get('matched_industry_codes'):
         blocks.append({
             'blk_id': f"BK{ddmmyyyy}",
             'name': f"{yymmdd}板块",
-            'codes': result['matched_industry_codes'],
+            'codes': summary['matched_industry_codes'],
         })
-    if result.get('matched_stocks'):
-        blocks.append({
-            'blk_id': f"GG{ddmmyyyy}",
-            'name': f"{yymmdd}个股",
-            'codes': result['matched_stocks'],
-        })
+    for fname, fresult in formulas.items():
+        stocks = fresult.get('matched_stocks', [])
+        if stocks:
+            tag = fname[:4]
+            blocks.append({
+                'blk_id': f"GG{ddmmyyyy}_{tag}",
+                'name': f"{yymmdd}{tag}",
+                'codes': stocks,
+            })
 
     if not blocks:
         return

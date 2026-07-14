@@ -162,7 +162,10 @@ def main():
     _COST = args.cost_bps / 10000.0
     _START = np.datetime64(args.start)
     _END = np.datetime64(args.end)
-    _AST = parse_file(args.formula or config.STOCK_SELECT_FILE)
+    from config import STOCK_RESEARCH_DIR
+    stock_files = sorted([f for f in os.listdir(STOCK_RESEARCH_DIR) if f.endswith('.txt')])
+    formula_path = os.path.join(STOCK_RESEARCH_DIR, stock_files[0]) if stock_files else None
+    _AST = parse_file(args.formula or formula_path)
 
     start_load = (int(args.start[:4]) - 1) * 10000 + 101       # 多读一年做指标预热
     end_int = int(args.end.replace("-", ""))

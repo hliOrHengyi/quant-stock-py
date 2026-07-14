@@ -63,11 +63,12 @@ TDX_HQ_CACHE = os.path.join(TDX_ROOT, "T0002", "hq_cache")
 
 # ========== 选股公式文件路径 ==========
 
-# 默认板块选择公式文件
-INDUSTRY_SELECT_FILE = os.path.join(PROJECT_ROOT, "板块选择.txt")
+# 板块筛选公式文件（BlockResearch/ 下，一个公式筛选符合条件的板块）
+INDUSTRY_SELECT_FILE = os.path.join(
+    PROJECT_ROOT, "BlockResearch", "B板块筛选_多空线MACD.txt")
 
-# 默认个股选择公式文件
-STOCK_SELECT_FILE = os.path.join(PROJECT_ROOT, "个股选股.txt")
+# 个股公式目录（StockResearch/ 下，所有 .txt 文件都会被自动加载为独立的个股选股公式）
+STOCK_RESEARCH_DIR = os.path.join(PROJECT_ROOT, "StockResearch")
 
 # ========== 输出路径（写入当前项目目录） ==========
 

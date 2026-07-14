@@ -18,7 +18,7 @@ import pandas as pd
 
 import config
 from config import (
-    INDUSTRY_SELECT_FILE, STOCK_SELECT_FILE, OUTPUT_BLOCK_FILE,
+    INDUSTRY_SELECT_FILE, STOCK_RESEARCH_DIR, OUTPUT_BLOCK_FILE,
     BACKUP_OUTPUT, MIN_DAYS
 )
 from data.reader import (
@@ -75,19 +75,19 @@ class SelectionEngine:
     
     def __init__(self,
                  industry_formula_file: str = None,
-                 stock_formula_file: str = None,
+                 stock_formula_dir: str = None,
                  verbose: bool = True,
                  skip_industry: bool = False,
                  skip_stock: bool = False,
                  jobs: int = None):
         self.industry_formula_file = industry_formula_file or INDUSTRY_SELECT_FILE
-        self.stock_formula_file = stock_formula_file or STOCK_SELECT_FILE
+        self.stock_formula_dir = stock_formula_dir or STOCK_RESEARCH_DIR
         self.verbose = verbose
         self._skip_industry = skip_industry
         self._skip_stock = skip_stock
         self._jobs = jobs          # None=自动(cpu-2); 1=串行
         self._industry_ast = None
-        self._stock_ast = None
+        self._stock_asts = []      # [(name, ast), ...]
         self._load_formulas()
     
     def _log(self, msg: str, **kwargs):
@@ -108,42 +108,95 @@ class SelectionEngine:
         else:
             self._log(f"  [警告] 板块选择公式文件不存在: {self.industry_formula_file}")
         
-        # 个股选择公式
-        if os.path.isfile(self.stock_formula_file):
-            self._log(f"  个股选择公式: {self.stock_formula_file}")
-            self._stock_ast = parse_formula_file(self.stock_formula_file)
-            stmt_count = len(self._stock_ast.statements)
-            self._log(f"  解析完成: {stmt_count} 条语句")
+        # 个股选择公式（目录下所有 .txt 文件，每个作为独立公式）
+        self._stock_asts = []
+        if os.path.isdir(self.stock_formula_dir):
+            formula_files = sorted([
+                f for f in os.listdir(self.stock_formula_dir)
+                if f.endswith(".txt")
+            ])
+            for fname in formula_files:
+                fpath = os.path.join(self.stock_formula_dir, fname)
+                name = fname.replace(".txt", "")
+                self._log(f"  个股选择公式: {fpath}")
+                ast = parse_formula_file(fpath)
+                stmt_count = len(ast.statements)
+                self._log(f"    -> [{name}] 解析完成: {stmt_count} 条语句")
+                self._stock_asts.append((name, ast))
+            if not self._stock_asts:
+                self._log(f"  [警告] 个股公式目录为空: {self.stock_formula_dir}")
         else:
-            self._log(f"  [警告] 个股选择公式文件不存在: {self.stock_formula_file}")
+            self._log(f"  [警告] 个股公式目录不存在: {self.stock_formula_dir}")
         
         self._log("=" * 60)
-    
+
+    def _load_preferred_blocks(self) -> List[str]:
+        """
+        Load preferred blocks from hliPreferredBlock.txt.
+        These blocks are force-added to results regardless of formula.
+        """
+        pref_file = os.path.join(
+            os.path.dirname(self.industry_formula_file),
+            "hliPreferredBlock.txt"
+        )
+        if not os.path.isfile(pref_file):
+            return []
+
+        codes = []
+        with open(pref_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("{") or line.startswith("#"):
+                    continue
+                code = ""
+                for ch in line:
+                    if ch.isdigit():
+                        code += ch
+                    elif code:
+                        break
+                if len(code) == 6 and not code.startswith("0"):
+                    codes.append(code)
+
+        if codes:
+            self._log(f"  个人首选板块: {', '.join(codes)}")
+        return codes
+
     def run(self) -> Dict:
         """
         执行完整选股流程。
+        先板块筛选（一个公式），再对每个个股公式分别执行筛选。
         
         Returns:
-            { 
-                'matched_stocks': ['600519', '000001', ...], 
-                'total_industries': 300,
-                'matched_industries': 15,
-                'matched_industry_names': ['半导体', '银行', ...],
-                'total_candidates': 500,
-                'total_matched': 10,
-                'duration': 12.5,
-                'errors': []
+            {
+                'summary': {
+                    'total_industries': int,
+                    'matched_industries': int,
+                    'matched_industry_codes': [...],
+                    'total_candidates': int,
+                    'duration': float,
+                    'errors': [...],
+                },
+                'formulas': {
+                    '公式名1': {
+                        'matched_stocks': [...],
+                        'total_matched': int,
+                        'stock_details': [...],
+                        'condition_diag': {...},
+                    },
+                    '公式名2': {...},
+                }
             }
         """
         result = {
-            'matched_stocks': [],
-            'total_industries': 0,
-            'matched_industries': 0,
-            'matched_industry_names': [],
-            'total_candidates': 0,
-            'total_matched': 0,
-            'duration': 0,
-            'errors': [],
+            'formulas': {},
+            'summary': {
+                'total_industries': 0,
+                'matched_industries': 0,
+                'matched_industry_codes': [],
+                'total_candidates': 0,
+                'duration': 0,
+                'errors': [],
+            },
         }
         
         start_time = time.time()
@@ -155,11 +208,24 @@ class SelectionEngine:
                 self._log("\nStep 1: 板块筛选 [已跳过]")
                 self._log("-" * 60)
             else:
-                matched_industry_codes = self._filter_industries(result)
+                matched_industry_codes = self._filter_industries(result['summary'])
+                
+                # 合并个人长期看好板块（不论公式是否选中，强制加入）
+                preferred = self._load_preferred_blocks()
+                if preferred:
+                    added = 0
+                    for code in preferred:
+                        if code not in matched_industry_codes:
+                            matched_industry_codes.append(code)
+                            added += 1
+                    if added:
+                        self._log(f"\n  [首选板块] 强制加入 {added} 个个人板块: {', '.join(preferred)}")
+                    result["summary"]["preferred_blocks"] = preferred
+                    result["summary"]["matched_industries"] = len(matched_industry_codes)
                 
                 if not matched_industry_codes:
                     self._log("\n没有符合条件的板块，选股结束。")
-                    result["duration"] = time.time() - start_time
+                    result['summary']['duration'] = round(time.time() - start_time, 2)
                     return result
             
             # Step 2: 获取候选个股
@@ -168,37 +234,44 @@ class SelectionEngine:
                 self._log("-" * 60)
                 scan_results = scan_all_stocks()
                 candidate_stocks = [s["code"] for s in scan_results if "code" in s]
-                result["total_industries"] = 0
-                result["matched_industries"] = 0
-                result["total_candidates"] = len(candidate_stocks)
+                result['summary']['total_industries'] = 0
+                result['summary']['matched_industries'] = 0
+                result['summary']['total_candidates'] = len(candidate_stocks)
                 self._log(f"  扫描到 {len(candidate_stocks)} 只个股")
             else:
                 candidate_stocks = self._get_candidate_stocks(
-                    matched_industry_codes, result
+                    matched_industry_codes, result['summary']
                 )
             
             if not candidate_stocks:
                 self._log("\n候选个股列表为空，选股结束。")
-                result["duration"] = time.time() - start_time
+                result['summary']['duration'] = round(time.time() - start_time, 2)
                 return result
             
-            # Step 3: 个股筛选
-            if self._skip_stock:
-                matched_stocks = candidate_stocks
-                self._log("\nStep 3: 个股筛选 [已跳过]")
-                self._log(f"  全部 {len(matched_stocks)} 只候选个股作为结果")
+            # Step 3: 个股筛选（每个公式独立运行）
+            if self._skip_stock or not self._stock_asts:
+                self._log("\nStep 3: 个股筛选 [已跳过或无公式]")
             else:
-                matched_stocks = self._filter_stocks(candidate_stocks, result)
-            
-            result["matched_stocks"] = matched_stocks
-            result["total_matched"] = len(matched_stocks)
+                for name, ast in self._stock_asts:
+                    self._log(f"\n{'=' * 60}")
+                    self._log(f"个股筛选 - [{name}]")
+                    self._log('-' * 60)
+                    
+                    formula_result = {}
+                    matched = self._filter_stocks(
+                        candidate_stocks, formula_result,
+                        name=name, stock_ast=ast
+                    )
+                    formula_result['matched_stocks'] = matched
+                    formula_result['total_matched'] = len(matched)
+                    result['formulas'][name] = formula_result
             
         except Exception as e:
             error_msg = f"选股过程出错: {e}"
             self._log(f"\n[错误] {error_msg}")
-            result['errors'].append(error_msg)
+            result['summary']['errors'].append(error_msg)
         
-        result['duration'] = round(time.time() - start_time, 2)
+        result['summary']['duration'] = round(time.time() - start_time, 2)
         return result
     
     def _filter_industries(self, result: Dict) -> List[str]:
@@ -298,27 +371,21 @@ class SelectionEngine:
         return sorted(all_stocks)
     def _filter_stocks(self,
                        candidate_stocks: List[str],
-                       result: Dict) -> List[str]:
+                       result: Dict,
+                       name: str = "",
+                       stock_ast=None) -> List[str]:
         """
         Step 3: 个股筛选。
         遍历所有候选个股，执行个股选择公式，返回符合条件的个股代码列表。
         """
-        self._log("\n" + "=" * 60)
-        self._log("Step 3: 个股筛选")
-        self._log("-" * 60)
-        
-        if self._stock_ast is None:
-            self._log("  [跳过] 未加载个股选择公式")
-            return []
-
         total = len(candidate_stocks)
         jobs = self._resolve_jobs(total)
 
         if jobs > 1:
             self._log(f"  并行筛选 {total} 只候选个股，{jobs} 进程...")
-            outcomes = self._eval_stocks_parallel(candidate_stocks, jobs)
+            outcomes = self._eval_stocks_parallel(candidate_stocks, jobs, stock_ast)
         else:
-            outcomes = self._eval_stocks_serial(candidate_stocks)
+            outcomes = self._eval_stocks_serial(candidate_stocks, stock_ast)
 
         # 汇总（串行/并行共用）：条件诊断 + 命中明细
         matched_stocks = []
@@ -330,7 +397,7 @@ class SelectionEngine:
             if info is None:
                 continue                       # 数据不足，跳过
             if "error" in info:
-                result['errors'].append(f"个股 {code}: {info['error']}")
+                result.setdefault('errors', []).append(f"个股 {code}: {info['error']}")
                 continue
             evaluated += 1
             for label, ok in info["conditions"]:
@@ -370,13 +437,13 @@ class SelectionEngine:
             return max(1, self._jobs)
         return max(1, (os.cpu_count() or 4) - 2)
 
-    def _eval_stocks_serial(self, candidate_stocks: List[str]) -> List[Tuple[str, Optional[Dict]]]:
+    def _eval_stocks_serial(self, candidate_stocks: List[str], stock_ast=None) -> List[Tuple[str, Optional[Dict]]]:
         """串行执行个股公式（逐只打印进度）。"""
         total = len(candidate_stocks)
         out = []
         for i, code in enumerate(candidate_stocks):
             self._log(f"  [{i+1}/{total}] {code}...", end='')
-            code, info = _eval_one_stock_with(code, self._stock_ast)
+            code, info = _eval_one_stock_with(code, stock_ast)
             if info is None:
                 self._log(" 数据不足，跳过")
             elif "error" in info:
@@ -386,7 +453,7 @@ class SelectionEngine:
             out.append((code, info))
         return out
 
-    def _eval_stocks_parallel(self, candidate_stocks: List[str], jobs: int):
+    def _eval_stocks_parallel(self, candidate_stocks: List[str], jobs: int, stock_ast=None):
         """多进程执行个股公式。tushare 模式下父进程先建面板，fork 写时复制共享。"""
         # 父进程构建一次重输入（全市场面板），供 fork 子进程共享
         if config.active_data_source() == "tushare":
@@ -403,6 +470,6 @@ class SelectionEngine:
         chunk = max(1, len(candidate_stocks) // (jobs * 8))
         with ctx.Pool(processes=jobs,
                       initializer=_init_stock_worker,
-                      initargs=(self._stock_ast, config.active_data_source())) as pool:
+                      initargs=(stock_ast, config.active_data_source())) as pool:
             return list(pool.imap(_eval_one_stock, candidate_stocks, chunksize=chunk))
 

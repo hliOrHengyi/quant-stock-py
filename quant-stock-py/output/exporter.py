@@ -20,7 +20,8 @@ def _daily_dir() -> str:
 
 def export_to_blk(stock_codes: List[str],
                   output_path: str = None,
-                  backup: bool = None) -> str:
+                  backup: bool = None,
+                  formula_name: str = None) -> str:
     """
     将选股结果导出为通达信 .blk 板块文件。
 
@@ -33,6 +34,7 @@ def export_to_blk(stock_codes: List[str],
         stock_codes: 股票代码列表，如 ['600519', '000001', ...]
         output_path: 输出文件路径，默认使用 config.OUTPUT_BLOCK_FILE
         backup: 是否备份现有文件
+        formula_name: 公式名称，用于多公式时区分文件名
 
     Returns:
         输出文件路径
@@ -40,7 +42,10 @@ def export_to_blk(stock_codes: List[str],
     from datetime import datetime
     if output_path is None:
         today = datetime.now()
-        output_path = os.path.join(_daily_dir(), f"{today.day:02d}{today.month:02d}{today.year}个股.blk")
+        stem = f"{today.day:02d}{today.month:02d}{today.year}"
+        if formula_name:
+            stem = f"{stem}_{formula_name}"
+        output_path = os.path.join(_daily_dir(), f"{stem}个股.blk")
     backup = BACKUP_OUTPUT if backup is None else backup
 
     # 确保输出目录存在
@@ -89,7 +94,7 @@ def export_to_blk(stock_codes: List[str],
 
 def export_summary(result: dict, output_path: str = None):
     """
-    导出选股摘要报告。
+    导出选股摘要报告（兼容新版 {summary, formulas} 和旧版扁平结构）。
 
     Args:
         result: engine.run() 返回的结果字典
@@ -97,6 +102,11 @@ def export_summary(result: dict, output_path: str = None):
     """
     if output_path is None:
         output_path = os.path.join(_daily_dir(), '选股报告.txt')
+
+    # 兼容新/旧两种结果结构
+    summary = result if 'summary' not in result else result['summary']
+    formulas = result.get('formulas', {})
+    has_formulas = bool(formulas)
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -107,34 +117,46 @@ def export_summary(result: dict, output_path: str = None):
         "=" * 60,
         "",
         f"【选股概况】",
-        f"  扫描板块指数: {result.get('total_industries', 0)} 个",
-        f"  符合条件板块: {result.get('matched_industries', 0)} 个",
-        f"  候选个股:     {result.get('total_candidates', 0)} 只",
-        f"  最终入选:     {result.get('total_matched', 0)} 只",
-        f"  耗时:         {result.get('duration', 0)} 秒",
-        "",
+        f"  扫描板块指数: {summary.get('total_industries', 0)} 个",
+        f"  符合条件板块: {summary.get('matched_industries', 0)} 个",
+        f"  候选个股:     {summary.get('total_candidates', 0)} 只",
     ]
 
-    if result.get('matched_industry_names'):
+    if has_formulas:
+        for fname, fresult in formulas.items():
+            lines.append(f"  [{fname}] 入选: {fresult.get('total_matched', 0)} 只")
+    else:
+        lines.append(f"  最终入选:     {summary.get('total_matched', 0)} 只")
+
+    lines.append(f"  耗时:         {summary.get('duration', 0)} 秒")
+    lines.append("")
+
+    if summary.get('matched_industry_names'):
         lines.append("【符合条件的板块】")
-        for name in result['matched_industry_names']:
-            lines.append(f"  - {name}")
+        for code in summary.get('matched_industry_codes', []):
+            lines.append(f"  - {code}")
         lines.append("")
 
-    if result.get('matched_stocks'):
+    if has_formulas:
+        for fname, fresult in formulas.items():
+            lines.append(f"【{fname} - 入选个股】")
+            for i, code in enumerate(fresult.get('matched_stocks', []), 1):
+                lines.append(f"  {i:3d}. {code}")
+            lines.append("")
+    elif summary.get('matched_stocks'):
         lines.append("【最终入选个股】")
-        for i, code in enumerate(result['matched_stocks'], 1):
+        for i, code in enumerate(summary['matched_stocks'], 1):
             lines.append(f"  {i:3d}. {code}")
         lines.append("")
 
-    if result.get('errors'):
+    if summary.get('errors'):
         lines.append("【错误信息】")
-        for err in result['errors']:
+        for err in summary['errors']:
             lines.append(f"  - {err}")
         lines.append("")
 
     lines.append("=" * 60)
-    lines.append("注意：本文件由系统自动生成，请将 日期选股.blk 文件")
+    lines.append("注意：本文件由系统自动生成，请将生成的 .blk 文件")
     lines.append("手动复制到通达信 T0002\\blocknew 目录下使用。")
     lines.append("=" * 60)
 
@@ -281,15 +303,11 @@ def _autofit(worksheet):
 
 def export_excel_report(result: dict, output_path: str = None,
                         industry_formula: str = None,
-                        stock_formula: str = None):
+                        stock_formula: str = None,
+                        formula_name: str = None):
     """
-    导出 Excel 版选股报告（多 sheet）：
-      1. 选股概况   —— 漏斗、转化率、参数、耗时
-      2. 个股明细   —— 命中个股的价格 + KDJ/量比/砖型图等指标快照
-      3. 板块汇总   —— 入选板块、成分股数、命中个股数、命中率
-      4. 条件诊断   —— 各子条件在候选池上的通过率（定位瓶颈）
-
-    缺少 openpyxl 时自动降级为 CSV 详情。
+    导出 Excel 版选股报告（多 sheet）。
+    多公式运行时每个公式独立一份。
     """
     import pandas as pd
     from datetime import datetime
@@ -303,8 +321,10 @@ def export_excel_report(result: dict, output_path: str = None,
 
     today = datetime.now()
     if output_path is None:
-        output_path = os.path.join(_daily_dir(),
-            f"{today.day:02d}{today.month:02d}{today.year}选股报告.xlsx")
+        stem = f"{today.day:02d}{today.month:02d}{today.year}"
+        if formula_name:
+            stem = f"{stem}_{formula_name}"
+        output_path = os.path.join(_daily_dir(), f"{stem}选股报告.xlsx")
 
     name_map, board_name_map = _active_name_maps()
     concept_map = _build_stock_concepts_map()
